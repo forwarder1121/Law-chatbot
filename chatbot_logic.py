@@ -35,12 +35,16 @@ def initialize_pinecone():
 
     # OpenAI 임베딩 로드
     embeddings = OpenAIEmbeddings(
-        model="text-embedding-ada-002",  # OpenAI의 임베딩 모델
+        model="text-embedding-ada-002",
         api_key=OPENAI_API_KEY
     )
 
-    # Pinecone VectorStore 생성
-    vectorstore = PineconeVectorStore(index=index, embedding=embeddings, text_key="page_content")
+    # Pinecone VectorStore 생성 - metadata_key 제거
+    vectorstore = PineconeVectorStore(
+        index=index,
+        embedding=embeddings,
+        text_key="text"        # metadata 내의 'text' 필드 사용
+    )
     return vectorstore
 
 def load_model():
@@ -56,19 +60,21 @@ def load_model():
 def rag_chain(vectorstore):
     llm = load_model()
 
-    # 리트리버 설정
-    reranker_model = HuggingFaceCrossEncoder(model_name="BAAI/bge-reranker-v2-m3")
-    compressor_15 = CrossEncoderReranker(model=reranker_model, top_n=15)
-    vs_retriever30 = vectorstore.as_retriever(search_kwargs={"k": 30})
-    retriever = ContextualCompressionRetriever(base_compressor=compressor_15, base_retriever=vs_retriever30)
+    # 수정된 리트리버 설정
+    retriever = vectorstore.as_retriever(
+        search_kwargs={
+            "k": 20,  # 상위 20개 문서 검색
+        }
+    )
     
-    # 리트리버 파이프라인
+    # 프롬프트 개선
     system_prompt = (
-        "Given a chat history and the latest user question "
-        "which might reference context in the chat history, "
+        "Given a chat history and the latest user question, "
         "formulate a standalone question which can be understood "
-        "without the chat history. Please answer the question with new retrieved context, "
-        "just reformulate it if needed and otherwise return it as is."
+        "without the chat history. The context is from legal documents "
+        "split into small chunks, so make sure to capture the essential "
+        "query elements. Consider document metadata like page numbers "
+        "and source files when relevant."
     )
 
     contextualize_prompt = ChatPromptTemplate.from_messages([
@@ -77,7 +83,7 @@ def rag_chain(vectorstore):
         ("human", "{input}"),
     ])
 
-    history_aware_retriever_modified = create_history_aware_retriever(
+    history_aware_retriever = create_history_aware_retriever(
         llm,
         retriever,
         contextualize_prompt
@@ -89,16 +95,18 @@ def rag_chain(vectorstore):
     my_retriever = (
         {"input": itemgetter("input"),
          "chat_history": itemgetter("chat_history")
-        } | history_aware_retriever_modified | 
+        } | history_aware_retriever | 
         RunnableLambda(lambda docs: reordering.transform_documents(docs))
     )
     
     # LLM 체인 설정
-    qa_system_prompt = """You are an assistant helping with question-answering tasks. 
+    qa_system_prompt = """You are a knowledgeable legal assistant helping with question-answering tasks. 
     Use the retrieved information to answer the questions. 
-    If the information includes details like card_name or specific benefits, make sure to include them in your answer. 
-    If you do not know the answer, simply say you don't know. 
-    Please provide the answers in Korean.
+    The context comes from legal documents that have been split into smaller chunks.
+    When relevant, reference the source document and page number in your answer.
+    If you need to combine information from multiple chunks, make sure to maintain accuracy.
+    If you do not know the answer or the information is not in the context, simply say you don't know. 
+    Please provide the answers in Korean, maintaining formal and professional language appropriate for legal content.
 
     {context}"""
 

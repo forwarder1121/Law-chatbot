@@ -25,72 +25,117 @@ if not PINECONE_API_KEY or not OPENAI_API_KEY or not PINECONE_ENVIRONMENT:
 
 EMBEDDING_DIMENSION = 1536
 
-def load_pdf_documents(pdf_path):
+def load_multiple_pdf_documents(pdf_paths):
+    text_splitter = RecursiveCharacterTextSplitter(
+        chunk_size=500,
+        chunk_overlap=100,
+        length_function=len,
+        separators=["\n\n", "\n", ".", "!", "?", ",", " ", ""],
+        is_separator_regex=False,
+    )
+
     documents = []
-    pdf_reader = PdfReader(pdf_path)
-    text = ""
-    for page in pdf_reader.pages:
-        text += page.extract_text()
+    for pdf_path in pdf_paths:
+        pdf_reader = PdfReader(pdf_path)
+        for page_num, page in enumerate(pdf_reader.pages):
+            text = page.extract_text()
+            
+            # 각 페이지의 텍스트를 더 작은 청크로 분할
+            chunks = text_splitter.split_text(text)
+            
+            # 각 청크에 대해 메타데이터 추가
+            for i, chunk in enumerate(chunks):
+                # 명시적으로 page_content 키 사용
+                doc = Document(
+                    page_content=chunk,  # 반드시 page_content 키 사용
+                    metadata={
+                        'source': pdf_path,
+                        'page': page_num + 1,
+                        'chunk': i + 1,
+                    }
+                )
+                documents.append(doc)
     
-    metadata = {'source': pdf_path}
-    documents.append(Document(page_content=text, metadata=metadata))
     return documents
 
 def create_embeddings_and_db(documents):
-    # 문서 분할
-    text_splitter = RecursiveCharacterTextSplitter(
-        chunk_size=1000,
-        chunk_overlap=200,
-        length_function=len
-    )
-    split_docs = text_splitter.split_documents(documents)
-
-    # OpenAI 임베딩 생성
+    # OpenAI 임베딩 설정
     embeddings = OpenAIEmbeddings(
         model="text-embedding-ada-002",
-        openai_api_key=OPENAI_API_KEY
+        api_key=OPENAI_API_KEY
     )
-
-    # Pinecone 초기화 및 인덱스 생성
+    
+    # Pinecone 초기화
     pc = Pinecone(api_key=PINECONE_API_KEY)
+    
+    # 인덱스 이름 설정
     index_name = "law-index"
-
-    # 인덱스가 없으면 생성
-    if index_name not in pc.list_indexes().names():
-        pc.create_index(
-            name=index_name,
-            dimension=EMBEDDING_DIMENSION,
-            metric='cosine',
-            spec=ServerlessSpec(
-                cloud="aws",
-                region="us-east-1"
-            )
+    
+    # 기존 인덱스가 있다면 삭제
+    if index_name in pc.list_indexes():
+        pc.delete_index(index_name)
+        time.sleep(20)  # 인덱스가 완전히 삭제될 때까지 대기
+    
+    # 새 인덱스 생성 - us-east-1 리전 설정
+    pc.create_index(
+        name=index_name,
+        dimension=1536,
+        metric='cosine',
+        spec=ServerlessSpec(
+            cloud='aws',
+            region='us-east-1'  # us-east-1 리전으로 변경
         )
-        # 인덱스가 준비될 때까지 대기
-        while True:
-            if pc.describe_index(index_name).status['ready']:
-                break
-            time.sleep(1)
-
-    # 인덱스 연결
+    )
+    
+    time.sleep(20)  # 인덱스가 준비될 때까지 대기
+    
+    # 인덱스 가져오기
     index = pc.Index(index_name)
-
-    # PineconeVectorStore 생성
-    vectorstore = PineconeVectorStore(
+    
+    # 문서를 작은 배치로 나누어 처리
+    batch_size = 100
+    for i in tqdm(range(0, len(documents), batch_size)):
+        # 배치 크기만큼 문서 선택
+        batch = documents[i:i + batch_size]
+        
+        # 각 문서에 대해 고유 ID 생성
+        ids = [str(uuid4()) for _ in batch]
+        
+        # 임베딩 생성 및 저장
+        texts = [doc.page_content for doc in batch]
+        metadatas = [doc.metadata for doc in batch]
+        embeds = embeddings.embed_documents(texts)
+        
+        # Pinecone에 직접 업로드
+        vectors = []
+        for id, embed, text, metadata in zip(ids, embeds, texts, metadatas):
+            vectors.append({
+                'id': id,
+                'values': embed,
+                'metadata': {
+                    'page_content': text,
+                    'text': text,
+                    **metadata
+                }
+            })
+        
+        index.upsert(vectors=vectors)
+        time.sleep(1)  # API 속도 제한 방지
+    
+    # 벡터스토어 반환
+    return PineconeVectorStore(
         index=index,
         embedding=embeddings,
-        text_key="text"
+        text_key="text"  # metadata의 text 필드를 사용
     )
 
-    # 문서에 UUID 할당 및 추가
-    uuids = [str(uuid4()) for _ in range(len(split_docs))]
-    for doc, uuid in tqdm(zip(split_docs, uuids), total=len(split_docs), desc="Pinecone에 문서 추가 중"):
-        vectorstore.add_documents(documents=[doc], ids=[uuid])
-
-    print("문서 저장이 완료되었습니다.")
-    return vectorstore
-
 if __name__ == "__main__":
-    pdf_path = "test.pdf"
-    documents = load_pdf_documents(pdf_path)
+    # PDF 파일 목록 정의
+    pdf_paths = ["1.pdf", "2.pdf", "3.pdf", "4.pdf"]
+    
+    print("PDF 문서 로딩 중...")
+    documents = load_multiple_pdf_documents(pdf_paths)
+    print(f"총 {len(documents)}개의 PDF 문서가 로드되었습니다.")
+    
+    print("임베딩 생성 및 Pinecone DB 저장 중...")
     create_embeddings_and_db(documents)
