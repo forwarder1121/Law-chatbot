@@ -131,7 +131,7 @@ def create_embeddings_and_db(documents):
 
 if __name__ == "__main__":
     # PDF 파일 목록 정의
-    pdf_paths = ["심리상담.pdf"]
+    pdf_paths = ["1.pdf", "2.pdf", "3.pdf", "4.pdf"]
     
     print("PDF 문서 로딩 중...")
     documents = load_multiple_pdf_documents(pdf_paths)
