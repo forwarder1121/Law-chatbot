@@ -2,6 +2,7 @@ langchain
 langchain-openai
 langchain-pinecone
 langchain-huggingface
+langchain-community
 pinecone-client
 PyPDF2
 streamlit
